@@ -1,0 +1,136 @@
+name: incident
+version: 1.0
+
+description: >
+  Canonical schema for operational incidents in the Incident Intelligence platform.
+
+fields:
+  - name: incident_id
+    type: string
+    nullable: false
+    description: Unique identifier for the incident
+
+  - name: created_at
+    type: timestamp
+    nullable: false
+    description: Timestamp when the incident was created
+
+  - name: resolved_at
+    type: timestamp
+    nullable: true
+    description: Timestamp when the incident was resolved
+
+  - name: service
+    type: string
+    nullable: false
+    description: Service affected by the incident
+
+  - name: region
+    type: string
+    nullable: false
+    description: Infrastructure or geographic region
+
+  - name: severity
+    type: string
+    nullable: false
+    allowed_values:
+      - SEV1
+      - SEV2
+      - SEV3
+      - SEV4
+    description: Incident severity classification
+
+  - name: category
+    type: string
+    nullable: false
+    allowed_values:
+      - availability
+      - performance
+      - security
+      - deployment
+      - dependency
+      - data
+      - infrastructure
+    description: Primary incident category
+
+  - name: status
+    type: string
+    nullable: false
+    allowed_values:
+      - OPEN
+      - RESOLVED
+    description: Current incident status
+
+  - name: description
+    type: string
+    nullable: false
+    description: Human-readable description of the incident
+
+  - name: affected_users
+    type: integer
+    nullable: false
+    description: Estimated number of users affected
+
+  - name: error_rate
+    type: double
+    nullable: false
+    description: Percentage of requests resulting in errors
+
+  - name: latency_ms
+    type: double
+    nullable: false
+    description: Service latency in milliseconds
+
+  - name: request_volume
+    type: long
+    nullable: false
+    description: Number of requests during the incident
+
+  - name: cpu_utilization
+    type: double
+    nullable: false
+    description: CPU utilization percentage
+
+  - name: memory_utilization
+    type: double
+    nullable: false
+    description: Memory utilization percentage
+
+  - name: root_cause
+    type: string
+    nullable: true
+    description: Identified root cause of the incident
+
+  - name: resolution
+    type: string
+    nullable: true
+    description: Action taken to resolve the incident
+
+  - name: resolver_team
+    type: string
+    nullable: true
+    description: Team responsible for resolving the incident
+
+  - name: source_system
+    type: string
+    nullable: false
+    description: System from which the incident originated
+
+  - name: environment
+    type: string
+    nullable: false
+    allowed_values:
+      - prod
+      - staging
+      - dev
+    description: Environment where the incident occurred
+
+  - name: created_by
+    type: string
+    nullable: false
+    description: System or user that created the incident
+
+  - name: ingested_at
+    type: timestamp
+    nullable: false
+    description: Timestamp when the platform ingested the record
