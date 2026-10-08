@@ -1,0 +1,109 @@
+name: incident_quality_rules
+version: 1.0
+
+rules:
+
+  - id: incident_id_not_null
+    column: incident_id
+    check: not_null
+    severity: critical
+    description: Incident ID must be present
+
+  - id: incident_id_unique
+    column: incident_id
+    check: unique
+    severity: critical
+    description: Each incident ID must identify exactly one incident
+
+  - id: created_at_not_null
+    column: created_at
+    check: not_null
+    severity: critical
+    description: Incident creation timestamp must be present
+
+  - id: resolved_at_after_created_at
+    columns:
+      - created_at
+      - resolved_at
+    check: resolved_at_greater_than_created_at
+    severity: critical
+    description: Resolution time cannot occur before incident creation
+
+  - id: severity_valid
+    column: severity
+    check: allowed_values
+    values:
+      - SEV1
+      - SEV2
+      - SEV3
+      - SEV4
+    severity: high
+    description: Severity must use the canonical severity values
+
+  - id: category_valid
+    column: category
+    check: allowed_values
+    values:
+      - availability
+      - performance
+      - security
+      - deployment
+      - dependency
+      - data
+      - infrastructure
+    severity: high
+    description: Incident category must use a supported category
+
+  - id: status_valid
+    column: status
+    check: allowed_values
+    values:
+      - OPEN
+      - RESOLVED
+    severity: high
+    description: Incident status must use a supported status
+
+  - id: affected_users_non_negative
+    column: affected_users
+    check: greater_than_or_equal
+    value: 0
+    severity: high
+    description: Affected user count cannot be negative
+
+  - id: error_rate_range
+    column: error_rate
+    check: range
+    min: 0
+    max: 100
+    severity: high
+    description: Error rate must be between 0 and 100 percent
+
+  - id: latency_non_negative
+    column: latency_ms
+    check: greater_than_or_equal
+    value: 0
+    severity: medium
+    description: Latency cannot be negative
+
+  - id: request_volume_non_negative
+    column: request_volume
+    check: greater_than_or_equal
+    value: 0
+    severity: medium
+    description: Request volume cannot be negative
+
+  - id: cpu_utilization_range
+    column: cpu_utilization
+    check: range
+    min: 0
+    max: 100
+    severity: high
+    description: CPU utilization must be between 0 and 100 percent
+
+  - id: memory_utilization_range
+    column: memory_utilization
+    check: range
+    min: 0
+    max: 100
+    severity: high
+    description: Memory utilization must be between 0 and 100 percent

@@ -22,6 +22,10 @@ env/
 # Data
 data/raw/
 data/processed/
+data/bronze/
+data/silver/
+data/gold/
+data/quarantine/
 
 # Logs
 *.log
