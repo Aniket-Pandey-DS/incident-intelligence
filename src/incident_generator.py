@@ -96,20 +96,25 @@ def generate_incidents(
 
         severity = random.choice(SEVERITIES)
 
-        duration_minutes = random.randint(5, 360)
-        resolved_at = created_at + timedelta(minutes=duration_minutes)
+        is_resolved = random.random() < 0.8
+
+        if is_resolved:
+            duration_minutes = random.randint(5, 360)
+            resolved_at = created_at + timedelta(minutes=duration_minutes)
+        else:
+            resolved_at = None
 
         service = random.choice(SERVICES)
 
         record = {
             "incident_id": f"INC-{i:05d}",
             "created_at": created_at.isoformat(),
-            "resolved_at": resolved_at.isoformat(),
+            "resolved_at": resolved_at.isoformat() if resolved_at else "",
             "service": service,
             "region": random.choice(REGIONS),
             "severity": severity,
             "category": random.choice(CATEGORIES),
-            "status": "RESOLVED",
+            "status": "RESOLVED" if is_resolved else "OPEN",
             "description": (
                 f"{severity} incident affecting {service}"
             ),
@@ -126,7 +131,7 @@ def generate_incidents(
             "environment": random.choice(ENVIRONMENTS),
             "created_by": "incident-management-system",
             "ingested_at": (
-                resolved_at + timedelta(minutes=random.randint(1, 30))
+                (resolved_at or created_at) + timedelta(minutes=random.randint(1, 30))
             ).isoformat(),
         }
 
