@@ -8,7 +8,22 @@ from src.gold_quality import (
     validate_incident_counts,
     validate_group_counts,
     validate_unique_grain,
+    validate_resolution_performance_schema,
+    validate_resolution_counts,
+    validate_resolution_metrics,
+    validate_resolution_unique_grain,
 )
+
+RESOLUTION_PERFORMANCE_SCHEMA = StructType([
+    StructField("resolution_date", DateType(), True),
+    StructField("service", StringType(), True),
+    StructField("severity", StringType(), True),
+    StructField("resolved_incident_count", IntegerType(), True),
+    StructField("duration_observation_count", IntegerType(), True),
+    StructField("avg_resolution_minutes", DoubleType(), True),
+    StructField("median_resolution_minutes", DoubleType(), True),
+    StructField("max_resolution_minutes", DoubleType(), True),
+])
 
 @pytest.fixture
 def valid_gold_df(spark: SparkSession):
@@ -145,3 +160,168 @@ def test_validate_unique_grain_fails_on_duplicate(spark):
 
     with pytest.raises(ValueError, match="duplicate rows"):
         validate_unique_grain(df)
+
+
+def test_validate_resolution_performance_schema_passes(spark: SparkSession):
+    columns = [
+        "resolution_date",
+        "service",
+        "severity",
+        "resolved_incident_count",
+        "duration_observation_count",
+        "avg_resolution_minutes",
+        "median_resolution_minutes",
+        "max_resolution_minutes",
+    ]
+
+    gold_df = spark.createDataFrame([], schema=RESOLUTION_PERFORMANCE_SCHEMA)
+
+    validate_resolution_performance_schema(gold_df)
+
+
+def test_validate_resolution_performance_schema_missing_column(
+    spark: SparkSession,
+):
+    missing_column_schema = StructType([
+    field
+    for field in RESOLUTION_PERFORMANCE_SCHEMA.fields
+    if field.name != "max_resolution_minutes"])
+
+    gold_df = spark.createDataFrame([], schema=missing_column_schema)
+
+    with pytest.raises(
+        ValueError,
+        match="Resolution Performance schema is missing columns",
+    ):
+        validate_resolution_performance_schema(gold_df)
+
+def test_validate_resolution_counts_passes(spark: SparkSession):
+    from datetime import datetime
+
+    silver_data = [
+        (datetime(2026, 10, 1, 10, 0), "RESOLVED"),
+        (datetime(2026, 10, 1, 11, 0), "RESOLVED"),
+        (None, "RESOLVED"),
+        (None, "OPEN"),
+    ]
+
+    silver_df = spark.createDataFrame(
+        silver_data,
+        ["resolved_at", "status"],
+    )
+
+    gold_df = spark.createDataFrame(
+        [
+            (2,),
+        ],
+        ["resolved_incident_count"],
+    )
+
+    validate_resolution_counts(silver_df, gold_df)
+
+
+def test_validate_resolution_counts_fails(spark: SparkSession):
+    from datetime import datetime
+
+    silver_data = [
+        (datetime(2026, 10, 1, 10, 0), "RESOLVED"),
+        (datetime(2026, 10, 1, 11, 0), "RESOLVED"),
+    ]
+
+    silver_df = spark.createDataFrame(
+        silver_data,
+        ["resolved_at", "status"],
+    )
+
+    gold_df = spark.createDataFrame(
+        [
+            (1,),
+        ],
+        ["resolved_incident_count"],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Resolution count mismatch",
+    ):
+        validate_resolution_counts(silver_df, gold_df)
+
+def test_validate_resolution_metrics_passes(spark: SparkSession):
+    gold_df = spark.createDataFrame(
+        [
+            (2, 2, 60.0, 45.0, 90.0),
+            (1, 0, None, None, None),
+            (1, 1, 0.0, 0.0, 0.0),
+        ],
+        [
+            "resolved_incident_count",
+            "duration_observation_count",
+            "avg_resolution_minutes",
+            "median_resolution_minutes",
+            "max_resolution_minutes",
+        ],
+    )
+
+    validate_resolution_metrics(gold_df)
+
+
+def test_validate_resolution_metrics_fails_on_invalid_metrics(
+    spark: SparkSession,
+):
+    gold_df = spark.createDataFrame(
+        [
+            (1, 2, 60.0, 45.0, 90.0),
+        ],
+        [
+            "resolved_incident_count",
+            "duration_observation_count",
+            "avg_resolution_minutes",
+            "median_resolution_minutes",
+            "max_resolution_minutes",
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Resolution Performance contains invalid counts",
+    ):
+        validate_resolution_metrics(gold_df)
+
+def test_validate_resolution_unique_grain_passes(
+    spark: SparkSession,
+):
+    gold_df = spark.createDataFrame(
+        [
+            ("2026-10-01", "checkout", "SEV1"),
+            ("2026-10-01", "payments", "SEV2"),
+        ],
+        [
+            "resolution_date",
+            "service",
+            "severity",
+        ],
+    )
+
+    validate_resolution_unique_grain(gold_df)
+
+
+def test_validate_resolution_unique_grain_fails_on_duplicates(
+    spark: SparkSession,
+):
+    gold_df = spark.createDataFrame(
+        [
+            ("2026-10-01", "checkout", "SEV1"),
+            ("2026-10-01", "checkout", "SEV1"),
+        ],
+        [
+            "resolution_date",
+            "service",
+            "severity",
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Resolution Performance contains duplicate rows",
+    ):
+        validate_resolution_unique_grain(gold_df)
