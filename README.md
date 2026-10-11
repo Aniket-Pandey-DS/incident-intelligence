@@ -247,10 +247,6 @@ These counts describe the current synthetic dataset, not fixed production expect
 - Reproducible development workflows
 - Layered data architecture with clear responsibilities
 
-## Roadmap
-
-Future work will extend the pipeline with stronger record-level validation, safer publishing and recovery behavior, additional Gold analytics datasets, and other data engineering capabilities as the project evolves.
-
 ### 7. Versioned Dataset Publishing
 
 The Resolution Performance pipeline uses a versioned publishing mechanism to reduce the risk of exposing incomplete datasets to downstream consumers.
