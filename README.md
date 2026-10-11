@@ -6,7 +6,7 @@ A data engineering project that builds a reliable incident-data pipeline using P
 
 Incident Intelligence processes incident records through a structured data pipeline. It validates incoming data, quarantines invalid records, transforms accepted records into an enriched Silver dataset, and produces business-ready Gold analytics.
 
-The project focuses on production-oriented data engineering practices, including explicit schemas, configurable data quality rules, automated testing, versioned dataset publishing, and validation before publication.
+The project focuses on production-oriented data engineering practices, including explicit schemas, configurable data quality rules, automated testing, versioned dataset publishing, manifest-aware reads, and run-level observability.
 
 ## Architecture
 
@@ -42,19 +42,25 @@ Synthetic Incident Generator
       v
  Manifest-Aware Silver Reader
       |
-      +-----------------------+
-      |                       |
-      v                       v
- Gold Incident Summary   Gold Resolution Performance
-      |                       |
-      v                       v
- Gold Quality Gate       Gold Quality Gate
-      |                       |
-      v                       v
- Versioned Gold Output   Versioned Gold Output
+      +----------------------------+
+      |                            |
+      v                            v
+ Gold Incident Summary      Gold Resolution Performance
+      |                            |
+      v                            v
+ Gold Quality Gate          Gold Quality Gate
+      |                            |
+      v                            v
+ Versioned Gold Output      Versioned Gold Output
+      |                            |
+      +-------------+--------------+
+                    |
+                    v
+         Run-Level Observability
+         (JSONL execution records)
 ```
 
-Each pipeline validates its output before publishing a new version. Downstream Gold pipelines resolve the published Silver dataset through its manifest rather than relying on a hard-coded version directory.
+Each pipeline validates its output before publishing a new version. Downstream Gold pipelines resolve the published Silver dataset through its manifest rather than relying on a hard-coded version directory. The Silver and Gold pipelines also record execution metadata in separate JSONL logs.
 
 ## Current Implementation
 
@@ -216,7 +222,32 @@ The actual version ID is generated at runtime.
 
 **Important limitations:** This implementation targets a single publisher on a local filesystem. Atomic manifest replacement relies on local filesystem semantics. Concurrent publishers are not coordinated with locking or compare-and-swap, and cloud object storage requires storage-specific publication and consistency guarantees.
 
-### 8. Automated Testing
+### 8. Run-Level Observability
+
+The three transformation pipelines use the shared observability module in `src/run_observability.py`. Each run creates a unique run ID and records execution metadata in a JSON Lines (JSONL) file.
+
+| Pipeline | Run log |
+|---|---|
+| Silver | `data/observability/build_silver_runs.jsonl` |
+| Gold Incident Summary | `data/observability/build_gold_runs.jsonl` |
+| Gold Resolution Performance | `data/observability/build_resolution_performance_runs.jsonl` |
+
+Each record includes:
+
+- `run_id` — unique identifier for the execution.
+- `pipeline_name` — pipeline that ran.
+- `status` — `RUNNING`, `SUCCESS`, or `FAILED` as the run progresses.
+- `started_at` and `finished_at` — UTC timestamps.
+- `input_records` and `output_records` — row counts when available. For Gold pipelines, the output count is the number of aggregated Gold rows.
+- `quality_gate_passed` — quality-gate outcome, or `null` if the gate did not complete.
+- `published_version_path` — published version path after successful publication and read-back verification.
+- `error_message` — exception type and message when a run fails.
+
+Run records are appended rather than replacing previous records. A safe logging wrapper reports a warning if a JSONL write fails, avoiding masking an existing pipeline exception. If logging fails after an otherwise successful pipeline run, the pipeline may still succeed without a persisted run record.
+
+**Operational limitations:** These are local JSONL logs, not a centralized logging service or transactional audit store. Concurrent-writer coordination, guaranteed log persistence during filesystem failures, alerting, and log rotation are not implemented yet.
+
+### 9. Automated Testing
 
 Pytest tests cover:
 
@@ -230,11 +261,14 @@ Pytest tests cover:
 - Versioned publishing and manifest handling
 - Published dataset read-back and failure recovery
 - Pipeline publishing contracts
+- Run metadata generation and lifecycle updates
+- JSONL persistence and safe logging behavior
+- Pipeline observability contracts
 - Shared Spark test-session behavior
 
-Tests include valid scenarios, deliberately invalid inputs, count reconciliation, duplicate-grain detection, null handling, manifest replacement, and preservation of the previously published version when candidate verification fails.
+Tests include valid scenarios, deliberately invalid inputs, count reconciliation, duplicate-grain detection, null handling, manifest replacement, preservation of the previously published version when candidate verification fails, and structural checks that all three pipelines use the shared observability functions.
 
-**Current test suite: 62 passing tests.**
+**Current test suite: 76 passing tests.**
 
 ## Technology Stack
 
@@ -261,7 +295,8 @@ incident-intelligence/
 │   ├── gold/
 │   │   ├── incident_summary/
 │   │   └── resolution_performance/
-│   └── quarantine/
+│   ├── quarantine/
+│   └── observability/
 ├── pipeline/
 │   ├── ingest_incidents.py
 │   ├── build_silver.py
@@ -275,7 +310,8 @@ incident-intelligence/
 │   ├── silver_quality.py
 │   ├── gold_transform.py
 │   ├── gold_quality.py
-│   └── data_publishing.py
+│   ├── data_publishing.py
+│   └── run_observability.py
 ├── tests/
 │   ├── conftest.py
 │   ├── test_schema_loader.py
@@ -286,13 +322,15 @@ incident-intelligence/
 │   ├── test_gold_quality.py
 │   ├── test_gold_resolution_performance.py
 │   ├── test_data_publishing.py
-│   └── test_pipeline_publishing_contract.py
+│   ├── test_pipeline_publishing_contract.py
+│   ├── test_run_observability.py
+│   └── test_pipeline_observability_contract.py
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
 ```
 
-Generated datasets are local development artifacts and are excluded from Git through `.gitignore`.
+Generated datasets and observability logs are local development artifacts and are excluded from Git through `.gitignore`.
 
 ## Getting Started
 
@@ -341,6 +379,16 @@ python -m pipeline.build_resolution_performance
 pytest -v
 ```
 
+### Inspect the latest run records
+
+```bash
+tail -n 1 data/observability/build_silver_runs.jsonl
+tail -n 1 data/observability/build_gold_runs.jsonl
+tail -n 1 data/observability/build_resolution_performance_runs.jsonl
+```
+
+These commands show the most recently appended run record for each pipeline.
+
 ## Current Verification
 
 The current synthetic dataset and pipeline have been verified with:
@@ -352,9 +400,10 @@ The current synthetic dataset and pipeline have been verified with:
 - **27** columns in Silver.
 - **89** aggregated rows in Gold Incident Summary.
 - **8** columns in Gold Incident Summary.
-- **64** aggregated rows in Gold Resolution Performance in the previously verified run.
+- **64** aggregated rows in Gold Resolution Performance in the verified run.
 - **8** columns in Gold Resolution Performance.
-- **62** automated tests passing.
+- **76** automated tests passing.
+- Successful JSONL run records observed for Silver and both Gold pipelines.
 
 These counts describe the current synthetic dataset and verified runs, not fixed production expectations. Gold row counts depend on the data and the distinct combinations of each table's grouping dimensions. Version IDs and publication paths are generated dynamically.
 
@@ -367,10 +416,11 @@ These counts describe the current synthetic dataset and verified runs, not fixed
 - Automated regression testing
 - Validation before publication
 - Versioned datasets and manifest-aware readers
+- Run-level observability with execution IDs and status records
 - Reproducible development workflows
 - Layered data architecture with clear responsibilities
 - Explicit documentation of failure modes and operational limitations
 
 ## Roadmap
 
-The next stage is to strengthen operational reliability through run-level observability and idempotency. Planned improvements include tracking run IDs, execution status, timestamps, input and output counts, quality-check results, and failure reasons. Subsequent stages can introduce orchestration and additional downstream analytics while keeping data engineering reliability as the foundation.
+The next stage is to strengthen operational reliability through controlled failure scenarios and deeper idempotency testing. Planned improvements include verifying that previously published datasets remain available after failures, testing failure handling at different pipeline stages, and reviewing retry behavior. Later stages can introduce orchestration and additional downstream analytics while keeping data engineering reliability as the foundation.
