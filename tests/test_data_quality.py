@@ -17,27 +17,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RULES_PATH = PROJECT_ROOT / "configs" / "incident_quality_rules.yaml"
 
 
-def create_test_spark():
-    return (
-        SparkSession.builder
-        .appName("IncidentIntelligence-DataQualityTests")
-        .master("local[2]")
-        .getOrCreate()
-    )
-
-
-def test_quality_rules_detect_invalid_records():
-    spark = create_test_spark()
-
-    try:
-        data = [
-            ("INC-001", "SEV1", 100, 5.0, 50.0, 60.0),
-            ("INC-002", "SEV99", 100, 5.0, 50.0, 60.0),
-            ("INC-003", "SEV2", -10, 5.0, 50.0, 60.0),
-            ("INC-004", "SEV2", 100, 150.0, 50.0, 60.0),
+def test_quality_rules_detect_invalid_records(spark: SparkSession):
+    data = [
+        ("INC-001", "SEV1", 100, 5.0, 50.0, 60.0),
+        ("INC-002", "SEV99", 100, 5.0, 50.0, 60.0),
+        ("INC-003", "SEV2", -10, 5.0, 50.0, 60.0),
+        ("INC-004", "SEV2", 100, 150.0, 50.0, 60.0),
         ]
 
-        columns = [
+    columns = [
             "incident_id",
             "severity",
             "affected_users",
@@ -46,10 +34,10 @@ def test_quality_rules_detect_invalid_records():
             "memory_utilization",
         ]
 
-        df = spark.createDataFrame(data, columns)
+    df = spark.createDataFrame(data, columns)
 
-        # Add columns required by the quality rules.
-        df = (
+    # Add columns required by the quality rules.
+    df = (
             df.withColumn(
                 "created_at",
                 F.to_timestamp(F.lit("2026-01-01 10:00:00"))
@@ -64,47 +52,38 @@ def test_quality_rules_detect_invalid_records():
             .withColumn("request_volume", F.lit(1000))
         )
 
-        rules = [
+    rules = [
             rule
             for rule in load_quality_rules(RULES_PATH)
             if rule["check"] != "unique"
         ]
-        result = apply_quality_rules(df, rules)
+    result = apply_quality_rules(df, rules)
 
-        invalid_records = result.filter(
+    invalid_records = result.filter(
             "size(quality_issues) > 0"
         )
 
-        assert invalid_records.count() == 3
-
-    finally:
-        spark.stop()
+    assert invalid_records.count() == 3
 
 
-def test_unique_column_validation():
-    spark = create_test_spark()
-
-    try:
-        data = [
-            ("INC-001",),
-            ("INC-002",),
-            ("INC-001",),
-            ("INC-003",),
+def test_unique_column_validation(spark: SparkSession):
+    data = [
+        ("INC-001",),
+        ("INC-002",),
+        ("INC-001",),
+        ("INC-003",),
         ]
 
-        df = spark.createDataFrame(
-            data,
-            ["incident_id"],
-        )
+    df = spark.createDataFrame(
+        data,
+        ["incident_id"],
+    )
 
-        duplicates = validate_unique_columns(
-            df,
-            "incident_id",
-        )
+    duplicates = validate_unique_columns(
+        df,
+        "incident_id",
+    )
 
-        assert duplicates.count() == 1
-        assert duplicates.first()["incident_id"] == "INC-001"
-        assert duplicates.first()["count"] == 2
-
-    finally:
-        spark.stop()
+    assert duplicates.count() == 1
+    assert duplicates.first()["incident_id"] == "INC-001"
+    assert duplicates.first()["count"] == 2

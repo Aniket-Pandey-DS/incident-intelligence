@@ -7,6 +7,10 @@ from src.gold_quality import (
     validate_resolution_counts,
     validate_resolution_unique_grain,
 )
+from src.data_publishing import (
+    publish_parquet,
+    read_published_parquet,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SILVER_PATH = PROJECT_ROOT / "data" / "silver" / "incidents"
@@ -36,16 +40,28 @@ def main() -> None:
 
         gold_count = gold_df.count()
 
-        # Write the validated Gold dataset
-        gold_df.write.mode("overwrite").parquet(str(GOLD_PATH))
+        # Publish the validated Gold dataset as a new version
+        published_path = publish_parquet(
+            gold_df,
+            spark,
+            str(GOLD_PATH),
+        )
+
+        # Read the currently published version through its manifest
+        published_df = read_published_parquet(
+            spark,
+            str(GOLD_PATH),
+        )
 
         print(f"Silver records read: {silver_df.count()}")
-        print(f"Gold resolution performance rows written: {gold_count}")
-        print(f"Gold columns: {len(gold_df.columns)}")
+        print(f"Gold resolution performance rows: {gold_count}")
+        print(f"Published rows verified: {published_df.count()}")
+        print(f"Gold columns: {len(published_df.columns)}")
         print("Gold Resolution Performance quality gate: PASSED")
-        print(f"Gold output path: {GOLD_PATH}")
+        print(f"Published version path: {published_path}")
+        print(f"Current manifest: {GOLD_PATH / 'current.json'}")
 
-        gold_df.orderBy(
+        published_df.orderBy(
             "resolution_date",
             "service",
             "severity",

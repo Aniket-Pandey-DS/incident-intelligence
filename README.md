@@ -250,3 +250,33 @@ These counts describe the current synthetic dataset, not fixed production expect
 ## Roadmap
 
 Future work will extend the pipeline with stronger record-level validation, safer publishing and recovery behavior, additional Gold analytics datasets, and other data engineering capabilities as the project evolves.
+
+### 7. Versioned Dataset Publishing
+
+The Resolution Performance pipeline uses a versioned publishing mechanism to reduce the risk of exposing incomplete datasets to downstream consumers.
+
+**Publishing workflow:**
+
+1. Generate a unique version ID for each candidate dataset.
+2. Write the candidate Parquet output to a new version directory.
+3. Read the staged dataset and verify its row count.
+4. Update `current.json` only after verification succeeds.
+5. Allow downstream consumers to resolve the currently published version through the manifest.
+
+The manifest identifies the active dataset version:
+
+```json
+{
+  "version_id": "20261011T060410Z_29e29bc0",
+  "path": "versions/20261011T060410Z_29e29bc0"
+}
+```
+
+**Failure handling:**
+
+- If staging or row-count verification fails, the failed candidate is cleaned up.
+- The existing manifest remains unchanged if candidate verification fails.
+- A verified candidate is not removed if manifest publication fails.
+- Previously published versions are retained rather than overwritten during publication.
+
+This implementation is designed for a single publisher using a local filesystem. Concurrent publishers and cloud object storage require additional storage-specific coordination and publication guarantees.
