@@ -27,6 +27,9 @@ data/silver/
 data/gold/
 data/quarantine/
 
+# Local pipeline run logs
+data/observability/
+
 # Logs
 *.log
 
