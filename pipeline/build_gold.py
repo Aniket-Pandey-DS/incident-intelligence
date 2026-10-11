@@ -25,7 +25,10 @@ def main() -> None:
     )
 
     try:
-        silver_df = spark.read.parquet(str(SILVER_PATH))
+        silver_df = read_published_parquet(
+            spark,
+            str(SILVER_PATH),
+        )
         silver_count = silver_df.count()
 
         gold_df = build_incident_summary(silver_df)

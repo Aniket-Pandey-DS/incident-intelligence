@@ -4,50 +4,57 @@ A data engineering project that builds a reliable incident-data pipeline using P
 
 ## Project Overview
 
-Incident Intelligence processes incident records through a structured data pipeline. It validates incoming data, quarantines invalid records, transforms accepted records into an enriched Silver dataset, and aggregates Silver data into business-ready Gold analytics.
+Incident Intelligence processes incident records through a structured data pipeline. It validates incoming data, quarantines invalid records, transforms accepted records into an enriched Silver dataset, and produces business-ready Gold analytics.
 
-The project is being developed incrementally, with a focus on production-oriented data engineering practices.
+The project focuses on production-oriented data engineering practices, including explicit schemas, configurable data quality rules, automated testing, versioned dataset publishing, and validation before publication.
 
 ## Architecture
 
 ```text
 Synthetic Incident Generator
-            |
-            v
+           |
+           v
        Raw CSV Data
-            |
-            v
+           |
+           v
      Schema Enforcement
-            |
-            v
-   Bronze Ingestion Pipeline
-            |
-       +----+----+
-       |         |
-       v         v
+           |
+           v
+  Bronze Ingestion Pipeline
+           |
+      +----+----+
+      |         |
+      v         v
  Valid Records  Invalid Records
-       |         |
-       v         v
+      |         |
+      v         v
  Bronze Parquet  Quarantine Parquet
-       |
-       v
+      |
+      v
  Silver Transformation
-       |
-       v
+      |
+      v
  Silver Quality Gate
-       |
-       v
-  Silver Parquet
-       |
-       v
- Gold Aggregation
-       |
-       v
- Gold Quality Gate
-       |
-       v
- Gold Incident Summary
+      |
+      v
+ Silver Versioned Publishing
+      |
+      v
+ Manifest-Aware Silver Reader
+      |
+      +-----------------------+
+      |                       |
+      v                       v
+ Gold Incident Summary   Gold Resolution Performance
+      |                       |
+      v                       v
+ Gold Quality Gate       Gold Quality Gate
+      |                       |
+      v                       v
+ Versioned Gold Output   Versioned Gold Output
 ```
+
+Each pipeline validates its output before publishing a new version. Downstream Gold pipelines resolve the published Silver dataset through its manifest rather than relying on a hard-coded version directory.
 
 ## Current Implementation
 
@@ -64,6 +71,7 @@ Synthetic Incident Generator
 - Applies configurable data quality rules.
 - Separates valid records from invalid records.
 - Writes accepted records to Bronze Parquet and rejected records to quarantine Parquet.
+- Detects duplicate incident IDs and quarantines records that violate the configured rules.
 
 ### 3. Silver Transformation
 
@@ -77,25 +85,27 @@ The Silver pipeline enriches validated Bronze records with derived fields:
 
 It also trims whitespace from selected text fields, including `service` and `region`.
 
+The Silver dataset preserves the original 22 columns and adds five derived columns, resulting in 27 columns.
+
 ### 4. Silver Data Quality Gate
 
-Before writing Silver output, the pipeline validates:
+Before publishing Silver output, the pipeline validates:
 
 - **Schema integrity:** Required columns are present.
 - **Record-count preservation:** Bronze and Silver record counts match.
 - **Duration validity:** Resolved incidents have non-negative durations, and unresolved incidents have null durations.
-- **Derived-field correctness:** Severity priority, creation date, and resolution status flag agree with their source fields.
-- **Lifecycle consistency:** Incident status, resolution timestamp, and consistency flag follow the defined lifecycle rules.
+- **Derived-field correctness:** Severity priority, creation date, and resolution status consistency agree with their source fields.
+- **Lifecycle consistency:** Incident status, resolution timestamp, and the consistency flag follow the defined lifecycle rules.
 
-If a validator detects a violation, it raises an error and prevents the pipeline from reaching the Silver write step.
+If a validator detects a violation, it raises an error and prevents the candidate Silver dataset from being published.
 
 ### 5. Gold Analytics Layer
 
-The Gold pipeline aggregates Silver incidents into a business-ready summary for reporting and downstream analysis.
+The Gold layer contains two independently built analytical datasets.
 
-**Gold Incident Summary grain:** One row per `created_date`, `service`, `region`, and `severity`.
+#### Gold Incident Summary
 
-The summary contains eight columns:
+**Grain:** One row per `created_date`, `service`, `region`, and `severity`.
 
 | Column | Description |
 |---|---|
@@ -110,18 +120,103 @@ The summary contains eight columns:
 
 The average duration excludes null values. Groups with no available duration have a null average rather than a misleading value of zero.
 
-### 6. Gold Data Quality Gate
+#### Gold Resolution Performance
 
-Before writing Gold output, the pipeline validates:
+**Grain:** One row per `resolution_date`, `service`, and `severity`.
+
+This dataset focuses on resolved incidents with a non-null resolution timestamp.
+
+| Column | Description |
+|---|---|
+| `resolution_date` | Date the incident was resolved |
+| `service` | Affected service |
+| `severity` | Incident severity |
+| `resolved_incident_count` | Number of resolved incidents in the group |
+| `duration_observation_count` | Number of valid duration observations used for duration metrics |
+| `avg_resolution_minutes` | Average resolution duration in minutes |
+| `median_resolution_minutes` | Approximate median resolution duration in minutes |
+| `max_resolution_minutes` | Maximum resolution duration in minutes |
+
+The median is calculated using PySpark's `percentile_approx` function. This provides an approximate percentile rather than an exact median calculation.
+
+### 6. Gold Data Quality Gates
+
+Both Gold pipelines validate their output before publishing it.
+
+**Incident Summary validations:**
 
 - **Schema integrity:** All eight required columns are present.
-- **Incident-count preservation:** The sum of Gold `incident_count` values matches the Silver record count.
+- **Incident-count reconciliation:** The sum of Gold `incident_count` values matches the Silver record count.
 - **Group-count reconciliation:** Resolved and open counts are non-negative and sum to each group's total.
 - **Unique grain:** No duplicate rows exist for the defined four-column grouping grain.
 
-The Gold write step runs only after these validations succeed.
+**Resolution Performance validations:**
 
-### 7. Automated Testing
+- **Schema integrity:** All eight required columns are present.
+- **Resolution-count reconciliation:** Aggregated resolved incident counts match the eligible resolved Silver records.
+- **Metric validity:** Resolution-duration metrics satisfy the defined validity checks.
+- **Unique grain:** No duplicate rows exist for the defined three-column grouping grain.
+
+A failed validation prevents the candidate Gold dataset from becoming the published version.
+
+### 7. Versioned Dataset Publishing
+
+Silver and both Gold pipelines use a shared publishing module implemented in `src/data_publishing.py`.
+
+Instead of overwriting a single Parquet directory directly, each successful publication creates a new version under a `versions/` directory.
+
+**Publishing workflow:**
+
+1. Generate a unique version ID using a UTC timestamp and UUID suffix.
+2. Write candidate Parquet data to a new version directory.
+3. Read the staged dataset back and verify its row count.
+4. Update the `current.json` manifest only after verification succeeds.
+5. Allow downstream readers to resolve the currently published version through the manifest.
+
+Example directory structure:
+
+```text
+data/
+├── silver/
+│   └── incidents/
+│       ├── current.json
+│       └── versions/
+│           └── <version_id>/
+│               ├── part-*.parquet
+│               └── _SUCCESS
+└── gold/
+    ├── incident_summary/
+    │   ├── current.json
+    │   └── versions/
+    │       └── <version_id>/
+    └── resolution_performance/
+        ├── current.json
+        └── versions/
+            └── <version_id>/
+```
+
+The manifest identifies the currently published version:
+
+```json
+{
+  "version_id": "<version_id>",
+  "path": "versions/<version_id>"
+}
+```
+
+The actual version ID is generated at runtime.
+
+**Failure handling:**
+
+- If staging or row-count verification fails, the failed candidate version is removed.
+- If candidate verification fails, the existing manifest remains unchanged.
+- If manifest publication fails, the verified candidate is retained for inspection; it may remain unpublished.
+- Previously published versions are retained rather than overwritten.
+- The manifest-aware reader validates the manifest structure, checks that the relative path matches the version ID, and verifies that the referenced directory exists before reading Parquet.
+
+**Important limitations:** This implementation targets a single publisher on a local filesystem. Atomic manifest replacement relies on local filesystem semantics. Concurrent publishers are not coordinated with locking or compare-and-swap, and cloud object storage requires storage-specific publication and consistency guarantees.
+
+### 8. Automated Testing
 
 Pytest tests cover:
 
@@ -131,8 +226,15 @@ Pytest tests cover:
 - Silver quality validation
 - Gold transformations
 - Gold quality validation
+- Resolution Performance aggregations and quality checks
+- Versioned publishing and manifest handling
+- Published dataset read-back and failure recovery
+- Pipeline publishing contracts
+- Shared Spark test-session behavior
 
-Tests include valid scenarios, deliberately invalid inputs, count reconciliation, duplicate-grain detection, and handling of null values.
+Tests include valid scenarios, deliberately invalid inputs, count reconciliation, duplicate-grain detection, null handling, manifest replacement, and preservation of the previously published version when candidate verification fails.
+
+**Current test suite: 62 passing tests.**
 
 ## Technology Stack
 
@@ -142,7 +244,8 @@ Tests include valid scenarios, deliberately invalid inputs, count reconciliation
 - YAML
 - Parquet
 - pytest
-- uv for Python environment and dependency management
+- `uv` for Python environment and dependency management
+- Java 21
 
 ## Project Structure
 
@@ -156,11 +259,14 @@ incident-intelligence/
 │   ├── bronze/
 │   ├── silver/
 │   ├── gold/
+│   │   ├── incident_summary/
+│   │   └── resolution_performance/
 │   └── quarantine/
 ├── pipeline/
 │   ├── ingest_incidents.py
 │   ├── build_silver.py
-│   └── build_gold.py
+│   ├── build_gold.py
+│   └── build_resolution_performance.py
 ├── src/
 │   ├── schema_loader.py
 │   ├── incident_generator.py
@@ -168,7 +274,8 @@ incident-intelligence/
 │   ├── silver_transform.py
 │   ├── silver_quality.py
 │   ├── gold_transform.py
-│   └── gold_quality.py
+│   ├── gold_quality.py
+│   └── data_publishing.py
 ├── tests/
 │   ├── conftest.py
 │   ├── test_schema_loader.py
@@ -176,11 +283,16 @@ incident-intelligence/
 │   ├── test_silver_transform.py
 │   ├── test_silver_quality.py
 │   ├── test_gold_transform.py
-│   └── test_gold_quality.py
+│   ├── test_gold_quality.py
+│   ├── test_gold_resolution_performance.py
+│   ├── test_data_publishing.py
+│   └── test_pipeline_publishing_contract.py
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
 ```
+
+Generated datasets are local development artifacts and are excluded from Git through `.gitignore`.
 
 ## Getting Started
 
@@ -191,6 +303,8 @@ incident-intelligence/
 - `uv`
 
 ### Install dependencies
+
+Run the following commands from the project root:
 
 ```bash
 uv sync
@@ -209,10 +323,16 @@ python -m pipeline.ingest_incidents
 python -m pipeline.build_silver
 ```
 
-### Build the Gold analytics dataset
+### Build the Gold Incident Summary
 
 ```bash
 python -m pipeline.build_gold
+```
+
+### Build Gold Resolution Performance
+
+```bash
+python -m pipeline.build_resolution_performance
 ```
 
 ### Run all tests
@@ -225,16 +345,18 @@ pytest -v
 
 The current synthetic dataset and pipeline have been verified with:
 
-- 100 raw incident records generated.
-- 92 valid records accepted into Bronze.
-- 8 invalid records quarantined.
-- 92 records transformed into Silver.
-- 27 columns in the Silver dataset.
-- 89 aggregated rows produced in Gold.
-- 8 columns in the Gold Incident Summary.
-- 31 automated tests passing.
+- **100** raw incident records.
+- **92** valid records accepted into Bronze.
+- **8** invalid records quarantined.
+- **92** records transformed into Silver.
+- **27** columns in Silver.
+- **89** aggregated rows in Gold Incident Summary.
+- **8** columns in Gold Incident Summary.
+- **64** aggregated rows in Gold Resolution Performance in the previously verified run.
+- **8** columns in Gold Resolution Performance.
+- **62** automated tests passing.
 
-These counts describe the current synthetic dataset, not fixed production expectations. Gold row counts depend on the distinct combinations of creation date, service, region, and severity.
+These counts describe the current synthetic dataset and verified runs, not fixed production expectations. Gold row counts depend on the data and the distinct combinations of each table's grouping dimensions. Version IDs and publication paths are generated dynamically.
 
 ## Engineering Principles
 
@@ -243,36 +365,12 @@ These counts describe the current synthetic dataset, not fixed production expect
 - Separation of transformation and validation logic
 - Quarantine of invalid records
 - Automated regression testing
-- Validation before publishing transformed data
+- Validation before publication
+- Versioned datasets and manifest-aware readers
 - Reproducible development workflows
 - Layered data architecture with clear responsibilities
+- Explicit documentation of failure modes and operational limitations
 
-### 7. Versioned Dataset Publishing
+## Roadmap
 
-The Resolution Performance pipeline uses a versioned publishing mechanism to reduce the risk of exposing incomplete datasets to downstream consumers.
-
-**Publishing workflow:**
-
-1. Generate a unique version ID for each candidate dataset.
-2. Write the candidate Parquet output to a new version directory.
-3. Read the staged dataset and verify its row count.
-4. Update `current.json` only after verification succeeds.
-5. Allow downstream consumers to resolve the currently published version through the manifest.
-
-The manifest identifies the active dataset version:
-
-```json
-{
-  "version_id": "20261011T060410Z_29e29bc0",
-  "path": "versions/20261011T060410Z_29e29bc0"
-}
-```
-
-**Failure handling:**
-
-- If staging or row-count verification fails, the failed candidate is cleaned up.
-- The existing manifest remains unchanged if candidate verification fails.
-- A verified candidate is not removed if manifest publication fails.
-- Previously published versions are retained rather than overwritten during publication.
-
-This implementation is designed for a single publisher using a local filesystem. Concurrent publishers and cloud object storage require additional storage-specific coordination and publication guarantees.
+The next stage is to strengthen operational reliability through run-level observability and idempotency. Planned improvements include tracking run IDs, execution status, timestamps, input and output counts, quality-check results, and failure reasons. Subsequent stages can introduce orchestration and additional downstream analytics while keeping data engineering reliability as the foundation.

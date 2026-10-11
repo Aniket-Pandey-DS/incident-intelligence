@@ -72,21 +72,6 @@ def test_verify_staged_parquet_passes(spark: SparkSession, tmp_path):
         expected_count=2,
     )
 
-def test_verify_staged_parquet_passes(spark: SparkSession, tmp_path):
-    df = spark.createDataFrame(
-        [(1, "checkout"), (2, "payments")],
-        ["incident_id", "service"],
-    )
-
-    version_path = tmp_path / "staged"
-    df.write.parquet(str(version_path))
-
-    verify_staged_parquet(
-        spark,
-        str(version_path),
-        expected_count=2,
-    )
-
 def test_verify_staged_parquet_fails_on_count_mismatch(
     spark: SparkSession,
     tmp_path,

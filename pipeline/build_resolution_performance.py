@@ -27,7 +27,10 @@ def main() -> None:
 
     try:
         # Read the Silver dataset
-        silver_df = spark.read.parquet(str(SILVER_PATH))
+        silver_df = read_published_parquet(
+            spark,
+            str(SILVER_PATH),
+        )
 
         # Transform Silver into Gold Resolution Performance
         gold_df = build_resolution_performance(silver_df)

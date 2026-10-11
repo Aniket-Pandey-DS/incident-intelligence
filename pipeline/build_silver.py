@@ -8,6 +8,10 @@ from src.silver_quality import (
     validate_derived_fields,
     validate_lifecycle_consistency,
 )
+from src.data_publishing import (
+    publish_parquet,
+    read_published_parquet,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BRONZE_PATH = PROJECT_ROOT / "data" / "bronze" / "incidents"
@@ -34,12 +38,24 @@ def main() -> None:
         validate_derived_fields(silver_df)
         validate_lifecycle_consistency(silver_df)
 
-        silver_df.write.mode("overwrite").parquet(str(SILVER_PATH))
+        published_path = publish_parquet(
+            silver_df,
+            spark,
+            str(SILVER_PATH),
+        )
+
+        published_df = read_published_parquet(
+            spark,
+            str(SILVER_PATH),
+        )
 
         print(f"Bronze records read: {bronze_df.count()}")
-        print(f"Silver records written: {silver_df.count()}")
-        print(f"Silver columns: {len(silver_df.columns)}")
-        print(f"Silver output path: {SILVER_PATH}")
+        print(f"Silver records: {silver_df.count()}")
+        print(f"Published rows verified: {published_df.count()}")
+        print(f"Silver columns: {len(published_df.columns)}")
+        print("Silver quality gate: PASSED")
+        print(f"Published version path: {published_path}")
+        print(f"Current manifest: {SILVER_PATH / 'current.json'}")
 
     finally:
         spark.stop()
