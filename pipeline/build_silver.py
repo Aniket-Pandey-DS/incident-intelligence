@@ -39,7 +39,7 @@ def main() -> None:
             .getOrCreate()
         )
 
-        bronze_df = spark.read.parquet(str(BRONZE_PATH))
+        bronze_df = read_published_parquet(spark, str(BRONZE_PATH))
         bronze_count = bronze_df.count()
 
         silver_df = transform_incidents(bronze_df)

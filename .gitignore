@@ -30,6 +30,9 @@ data/quarantine/
 # Local pipeline run logs
 data/observability/
 
+# Local incremental ingestion state
+data/state/
+
 # Logs
 *.log
 

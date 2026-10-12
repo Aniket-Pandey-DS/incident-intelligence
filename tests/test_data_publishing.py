@@ -295,3 +295,250 @@ def test_read_published_parquet_rejects_invalid_manifest_path(
         match="Manifest path does not match",
     ):
         read_published_parquet(spark, str(target_dir))
+
+
+
+def test_failed_manifest_publication_preserves_current_version(
+    spark: SparkSession,
+    tmp_path,
+    monkeypatch,
+):
+    import json
+    import src.data_publishing as publishing
+
+    target_path = str(tmp_path / "dataset")
+
+    # Publish Version A.
+    original_df = spark.createDataFrame(
+        [(1, "checkout")],
+        ["incident_id", "service"],
+    )
+
+    first_path = publishing.publish_parquet(
+        original_df,
+        spark,
+        target_path,
+    )
+
+    manifest_path = tmp_path / "dataset" / "current.json"
+    original_manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+
+    # Simulate failure when attempting to publish Version B.
+    def fail_manifest_write(*args, **kwargs):
+        raise OSError("Simulated manifest publication failure")
+
+    monkeypatch.setattr(
+        publishing,
+        "write_current_manifest",
+        fail_manifest_write,
+    )
+
+    new_df = spark.createDataFrame(
+        [(2, "payments")],
+        ["incident_id", "service"],
+    )
+
+    with pytest.raises(
+        OSError,
+        match="Simulated manifest publication failure",
+    ):
+        publishing.publish_parquet(
+            new_df,
+            spark,
+            target_path,
+        )
+
+    # The manifest must still point to Version A.
+    current_manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+
+    assert current_manifest == original_manifest
+
+    # Version A must remain readable.
+    published_df = publishing.read_published_parquet(
+        spark,
+        target_path,
+    )
+
+    assert [
+        (row["incident_id"], row["service"])
+        for row in published_df.collect()
+    ] == [(1, "checkout")]
+
+    # Version B was verified, but was never published.
+    version_directories = list(
+        (tmp_path / "dataset" / "versions").iterdir()
+    )
+
+    assert len(version_directories) == 2
+    assert first_path in version_directories
+
+    unpublished_paths = [
+        path for path in version_directories
+        if path != first_path
+    ]
+
+    assert len(unpublished_paths) == 1
+    assert spark.read.parquet(
+        str(unpublished_paths[0])
+    ).collect()[0]["incident_id"] == 2
+
+
+
+def test_failed_staging_cleans_partial_candidate_and_preserves_current_version(
+    spark: SparkSession,
+    tmp_path,
+    monkeypatch,
+):
+    import json
+    import src.data_publishing as publishing
+
+    target_path = str(tmp_path / "dataset")
+
+    original_df = spark.createDataFrame(
+        [(1, "checkout")],
+        ["incident_id", "service"],
+    )
+
+    first_path = publishing.publish_parquet(
+        original_df,
+        spark,
+        target_path,
+    )
+
+    manifest_path = tmp_path / "dataset" / "current.json"
+    original_manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+
+    candidate_id = "simulated_failed_candidate"
+
+    monkeypatch.setattr(
+        publishing,
+        "generate_version_id",
+        lambda: candidate_id,
+    )
+
+    def fail_during_staging(df, target, version_id):
+        partial_path = (
+            tmp_path / "dataset" / "versions" / version_id
+        )
+        partial_path.mkdir(parents=True)
+        (partial_path / "partial.tmp").write_text(
+            "incomplete output",
+            encoding="utf-8",
+        )
+        raise OSError("Simulated staging failure")
+
+    monkeypatch.setattr(
+        publishing,
+        "stage_parquet",
+        fail_during_staging,
+    )
+
+    new_df = spark.createDataFrame(
+        [(2, "payments")],
+        ["incident_id", "service"],
+    )
+
+    with pytest.raises(
+        OSError,
+        match="Simulated staging failure",
+    ):
+        publishing.publish_parquet(
+            new_df,
+            spark,
+            target_path,
+        )
+
+    current_manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+
+    assert current_manifest == original_manifest
+    assert first_path.is_dir()
+    assert not (
+        tmp_path / "dataset" / "versions" / candidate_id
+    ).exists()
+
+    version_directories = list(
+        (tmp_path / "dataset" / "versions").iterdir()
+    )
+    assert version_directories == [first_path]
+
+
+
+def test_repeated_publication_preserves_dataset_contents(
+    spark: SparkSession,
+    tmp_path,
+):
+    import json
+    import src.data_publishing as publishing
+
+    target_path = str(tmp_path / "dataset")
+
+    df = spark.createDataFrame(
+        [
+            (1, "checkout"),
+            (2, "payments"),
+            (3, "identity"),
+        ],
+        ["incident_id", "service"],
+    )
+
+    # First run.
+    first_path = publishing.publish_parquet(
+        df,
+        spark,
+        target_path,
+    )
+
+    first_published = publishing.read_published_parquet(
+        spark,
+        target_path,
+    )
+
+    first_rows = {
+        tuple(row)
+        for row in first_published.collect()
+    }
+
+    # Second run with exactly the same input.
+    second_path = publishing.publish_parquet(
+        df,
+        spark,
+        target_path,
+    )
+
+    second_published = publishing.read_published_parquet(
+        spark,
+        target_path,
+    )
+
+    second_rows = {
+        tuple(row)
+        for row in second_published.collect()
+    }
+
+    manifest = json.loads(
+        (tmp_path / "dataset" / "current.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    # Each run gets a separate version.
+    assert first_path != second_path
+
+    # Both published datasets contain identical business data.
+    assert first_rows == second_rows
+    assert len(second_rows) == 3
+
+    # The manifest points to the latest successful version.
+    assert manifest["version_id"] == second_path.name
+
+    # The previous version remains available.
+    assert first_path.is_dir()
+    assert second_path.is_dir()

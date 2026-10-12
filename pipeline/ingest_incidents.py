@@ -10,6 +10,7 @@ from src.data_quality import (
     load_quality_rules,
     validate_unique_columns,
 )
+from src.data_publishing import publish_parquet
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -121,11 +122,16 @@ def ingest_incidents() -> None:
 
         BRONZE_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        (
-            valid_records.drop("quality_issues")
-            .write
-            .mode("overwrite")
-            .parquet(str(BRONZE_DATA_PATH))
+        published_path = publish_parquet(
+            valid_records.drop("quality_issues"),
+            spark,
+            str(BRONZE_DATA_PATH),
+        )
+
+        print(f"Bronze data published to: {published_path}")
+        print(
+            f"Current manifest: "
+            f"{BRONZE_DATA_PATH / 'current.json'}"
         )
 
         print(f"Bronze data written to: {BRONZE_DATA_PATH}")
