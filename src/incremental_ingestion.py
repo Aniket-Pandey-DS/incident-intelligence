@@ -247,16 +247,32 @@ def process_incident_batch(
     else:
         merged_df = valid_records
 
+    
     # Write quarantine to a batch-specific location so one batch
     # cannot overwrite another batch's quarantined records.
     batch_quarantine_path = quarantine_path / batch_id
 
-    if invalid_count > 0:
+    if invalid_count > 0 and not batch_quarantine_path.exists():
+        quarantine_path.mkdir(parents=True, exist_ok=True)
+        staging_path = quarantine_path / f".{batch_id}.staging"
+
+        if staging_path.exists():
+            import shutil
+            shutil.rmtree(staging_path)
+
         (
             invalid_records.write
             .mode("errorifexists")
-            .parquet(str(batch_quarantine_path))
+            .parquet(str(staging_path))
         )
+
+        try:
+            staging_path.rename(batch_quarantine_path)
+        except FileExistsError:
+            # Another attempt created the final directory first.
+            import shutil
+            shutil.rmtree(staging_path, ignore_errors=True)
+
 
     # Publish Bronze before marking the batch as processed.
     published_path = publish_parquet(

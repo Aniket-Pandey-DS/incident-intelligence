@@ -459,3 +459,79 @@ def test_second_batch_inserts_and_updates_incidents(spark, tmp_path):
         "batch_0001",
         "batch_0002",
     ]
+
+
+
+def test_batch_with_invalid_records_can_retry_after_publication_failure(
+    spark, tmp_path, monkeypatch
+):
+    import src.incremental_ingestion as ingestion
+
+    bronze = tmp_path / "bronze"
+    quarantine = tmp_path / "quarantine"
+    checkpoint = tmp_path / "state" / "incident_ingestion.json"
+
+    incoming = sample_batch(
+        spark,
+        [
+            ("INC-10001", "SEV1", 100),
+            ("INC-10002", "SEV99", 200),
+        ],
+    )
+
+    original_publish = ingestion.publish_parquet
+
+    def fail_publication(*args, **kwargs):
+        raise RuntimeError("simulated publication failure")
+
+    monkeypatch.setattr(
+        ingestion, "publish_parquet", fail_publication
+    )
+
+    # First attempt: quarantine succeeds, Bronze publication fails.
+    with pytest.raises(
+        RuntimeError, match="simulated publication failure"
+    ):
+        ingestion.process_incident_batch(
+            spark=spark,
+            incoming_df=incoming,
+            batch_id="batch_0001",
+            rules=batch_rules(),
+            bronze_path=bronze,
+            quarantine_path=quarantine,
+            checkpoint_path=checkpoint,
+        )
+
+    assert (quarantine / "batch_0001").is_dir()
+    assert load_checkpoint(checkpoint) == []
+
+    quarantined = spark.read.parquet(
+        str(quarantine / "batch_0001")
+    )
+
+    assert [
+        row["incident_id"]
+        for row in quarantined.select("incident_id").collect()
+    ] == ["INC-10002"]
+
+    # Second attempt: publication is restored and the same batch is retried.
+    monkeypatch.setattr(
+        ingestion, "publish_parquet", original_publish
+    )
+
+    result = ingestion.process_incident_batch(
+        spark=spark,
+        incoming_df=incoming,
+        batch_id="batch_0001",
+        rules=batch_rules(),
+        bronze_path=bronze,
+        quarantine_path=quarantine,
+        checkpoint_path=checkpoint,
+    )
+
+    assert result["status"] == "processed"
+    assert result["valid_records"] == 1
+    assert result["quarantined_records"] == 1
+    assert result["published_records"] == 1
+    assert load_checkpoint(checkpoint) == ["batch_0001"]
+
