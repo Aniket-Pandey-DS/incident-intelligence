@@ -1,304 +1,448 @@
 # Incident Intelligence
 
-A data engineering project that builds a reliable incident-data pipeline using Python, PySpark, schema enforcement, data quality validation, and a Bronze-to-Silver-to-Gold architecture.
+A data engineering portfolio project for building a reliable
+incident-data platform with Python, PySpark, schema enforcement, data
+quality validation, incremental ingestion, versioned publishing, and a
+Bronze--Silver--Gold architecture.
 
 ## Project Overview
 
-Incident Intelligence processes incident records through a structured data pipeline. It validates incoming data, quarantines invalid records, transforms accepted records into an enriched Silver dataset, and produces business-ready Gold analytics.
+Incident Intelligence ingests operational incident records, validates
+them against a YAML-defined data contract, quarantines invalid records,
+enriches accepted records in Silver, and produces analytical Gold
+datasets.
 
-The project focuses on production-oriented data engineering practices, including explicit schemas, configurable data quality rules, automated testing, versioned dataset publishing, manifest-aware reads, and run-level observability.
+The project emphasizes practical data engineering patterns:
+
+-   Explicit schema enforcement and configurable quality rules
+-   Bronze, Silver, and Gold data layers
+-   Incremental batch ingestion with insert/update merge semantics
+-   Batch checkpoints and replay handling
+-   Versioned Parquet publishing with manifest-aware reads
+-   Quality gates before publication
+-   Run-level observability for Silver and Gold transformations
+-   Automated regression and failure-path tests
+
+> **Implementation scope:** this is a local PySpark implementation
+> designed to demonstrate engineering patterns. It is not a distributed,
+> multi-writer production deployment. Limitations are documented below.
 
 ## Architecture
 
-```text
-Synthetic Incident Generator
-           |
-           v
-       Raw CSV Data
-           |
-           v
-     Schema Enforcement
-           |
-           v
-  Bronze Ingestion Pipeline
-           |
-      +----+----+
-      |         |
-      v         v
- Valid Records  Invalid Records
-      |         |
-      v         v
- Bronze Parquet  Quarantine Parquet
-      |
-      v
- Silver Transformation
-      |
-      v
- Silver Quality Gate
-      |
-      v
- Silver Versioned Publishing
-      |
-      v
- Manifest-Aware Silver Reader
-      |
-      +----------------------------+
-      |                            |
-      v                            v
- Gold Incident Summary      Gold Resolution Performance
-      |                            |
-      v                            v
- Gold Quality Gate          Gold Quality Gate
-      |                            |
-      v                            v
- Versioned Gold Output      Versioned Gold Output
-      |                            |
-      +-------------+--------------+
-                    |
-                    v
-         Run-Level Observability
-         (JSONL execution records)
-```
+``` text
+                         Raw CSV
+                            |
+                            v
+                  YAML Schema + Quality Rules
+                            |
+              +-------------+-------------+
+              |                           |
+              v                           v
+       Valid Bronze Records       Invalid Records
+              |                           |
+              v                           v
+      Versioned Bronze Parquet       Quarantine
+              |
+              v
+      Silver Transformation
+              |
+              v
+        Silver Quality Gate
+              |
+              v
+      Versioned Silver Parquet
+              |
+              v
+          +---+--------------------+
+          |                        |
+          v                        v
+  Gold Incident Summary    Gold Resolution Performance
+          |                        |
+          v                        v
+    Gold Quality Gate         Gold Quality Gate
+          |                        |
+          v                        v
+  Versioned Gold Output      Versioned Gold Output
 
-Each pipeline validates its output before publishing a new version. Downstream Gold pipelines resolve the published Silver dataset through its manifest rather than relying on a hard-coded version directory. The Silver and Gold pipelines also record execution metadata in separate JSONL logs.
+Incremental path:
+Incoming CSV batch -> Validate -> Quarantine invalid rows
+                   -> Merge with current Bronze snapshot
+                   -> Publish verified Bronze version
+                   -> Save processed-batch checkpoint
+```
 
 ## Current Implementation
 
-### 1. Synthetic Incident Data
+### 1. Synthetic incident data
 
-- Generates incident records with realistic operational fields.
-- Includes deliberately injected data quality issues for validation testing.
-- Uses a fixed random seed for reproducible generation.
+-   Generates incident records with operational fields.
+-   Includes deliberately injected data-quality issues.
+-   Uses a fixed random seed for reproducible generation.
 
-### 2. Bronze Ingestion
+### 2. Full-load Bronze ingestion
 
-- Loads the incident schema from YAML.
-- Reads raw CSV data using an explicit PySpark schema.
-- Applies configurable data quality rules.
-- Separates valid records from invalid records.
-- Writes accepted records to Bronze Parquet and rejected records to quarantine Parquet.
-- Detects duplicate incident IDs and quarantines records that violate the configured rules.
+The full-load ingestion pipeline:
 
-### 3. Silver Transformation
+-   Loads the canonical schema from `configs/incident_schema.yaml`.
+-   Reads the raw CSV using an explicit PySpark schema.
+-   Applies rules from `configs/incident_quality_rules.yaml`.
+-   Separates valid records from invalid records.
+-   Publishes valid records as versioned Bronze Parquet.
+-   Writes invalid records to quarantine.
+-   Detects duplicate incident IDs and applies the configured quality
+    rules.
 
-The Silver pipeline enriches validated Bronze records with derived fields:
+Run it with:
 
-- `incident_duration_minutes`
-- `severity_priority`
-- `is_resolved`
-- `created_date`
-- `resolution_status_consistent`
+``` bash
+python pipeline/ingest_incidents.py
+```
 
-It also trims whitespace from selected text fields, including `service` and `region`.
+The full-load pipeline is separate from the incremental test dataset
+described below.
 
-The Silver dataset preserves the original 22 columns and adds five derived columns, resulting in 27 columns.
+### 3. Incremental batch ingestion
 
-### 4. Silver Data Quality Gate
+The incremental runner is `pipeline/process_incident_batch.py`. It
+accepts a batch ID, loads the corresponding CSV from
+`data/incoming/incidents/`, applies the canonical schema and quality
+rules, merges valid records into the current incremental Bronze
+snapshot, publishes a new version, and then records the batch ID in a
+JSON checkpoint.
+
+Run an individual batch from the repository root:
+
+``` bash
+python pipeline/process_incident_batch.py batch_0001
+```
+
+The input file must be named `data/incoming/incidents/<batch_id>.csv`
+and contain the full 22-column incident schema.
+
+Example sample batches:
+
+``` text
+data/incoming/incidents/
+├── batch_0001.csv
+├── batch_0002.csv
+└── batch_0003.csv
+```
+
+The sample sequence demonstrates:
+
+-   `batch_0001`: inserts two valid incidents.
+-   `batch_0002`: updates an existing incident and inserts a new
+    incident.
+-   `batch_0003`: contains one valid incident and one invalid incident;
+    the invalid severity is quarantined.
+
+The incremental runner uses separate paths so the demonstration does not
+overwrite the full-load Bronze dataset:
+
+  Purpose                        Path
+  ------------------------------ ------------------------------------------
+  Incoming batch files           `data/incoming/incidents/`
+  Incremental Bronze snapshots   `data/bronze/incremental_incidents/`
+  Incremental quarantine         `data/quarantine/incremental_incidents/`
+  Processed-batch checkpoint     `data/state/incident_ingestion.json`
+
+The checkpoint is local runtime state and is excluded from Git. To
+replay the demo from a clean state, remove the incremental test outputs
+and checkpoint before running the sample batches again. Do not delete
+the normal `data/bronze/incidents/` dataset.
+
+Merge semantics: an incoming record replaces an existing record with the
+same `incident_id`; otherwise, the record is inserted. Records not
+present in the incoming batch are retained.
+
+#### Incremental processing guarantees and limitations
+
+-   A batch already present in the checkpoint is skipped.
+-   Bronze publication is performed before the batch checkpoint is
+    advanced.
+-   If publication fails, the checkpoint is not advanced.
+-   If checkpoint saving fails after publication, the batch can be
+    replayed; replay may create another physical version while
+    preserving the intended business rows.
+-   Incoming batch IDs are validated before being used in quarantine
+    paths.
+-   Quarantine, Bronze publication, and checkpoint persistence are
+    separate filesystem operations. They are not a single transaction.
+-   A failure while writing quarantine or while saving the checkpoint
+    after quarantine has been written can require manual
+    cleanup/recovery before replay, because the batch-specific
+    quarantine directory already exists.
+-   The implementation does not coordinate concurrent workers with locks
+    or compare-and-swap. Run batches sequentially.
+-   The checkpoint is a local JSON file, not a durable distributed state
+    store.
+
+### 4. Silver transformation
+
+The Silver pipeline enriches validated Bronze records with derived
+fields:
+
+-   `incident_duration_minutes`
+-   `severity_priority`
+-   `is_resolved`
+-   `created_date`
+-   `resolution_status_consistent`
+
+It also trims whitespace from selected text fields, including `service`
+and `region`.
+
+The Silver dataset preserves the original 22 columns and adds five
+derived columns, resulting in 27 columns.
+
+Run it with:
+
+``` bash
+python pipeline/build_silver.py
+```
+
+Silver reads the published Bronze version through the manifest-aware
+reader, validates the transformed dataset, and publishes a new Silver
+version only after its quality checks pass.
+
+### 5. Silver quality gate
 
 Before publishing Silver output, the pipeline validates:
 
-- **Schema integrity:** Required columns are present.
-- **Record-count preservation:** Bronze and Silver record counts match.
-- **Duration validity:** Resolved incidents have non-negative durations, and unresolved incidents have null durations.
-- **Derived-field correctness:** Severity priority, creation date, and resolution status consistency agree with their source fields.
-- **Lifecycle consistency:** Incident status, resolution timestamp, and the consistency flag follow the defined lifecycle rules.
+-   Required schema and columns
+-   Record-count preservation between Bronze and Silver
+-   Incident-duration validity
+-   Derived-field correctness
+-   Lifecycle consistency between status, resolution timestamp, and
+    consistency flags
 
-If a validator detects a violation, it raises an error and prevents the candidate Silver dataset from being published.
+A failed validator raises an error and prevents the candidate Silver
+dataset from being published.
 
-### 5. Gold Analytics Layer
+### 6. Gold analytics
 
 The Gold layer contains two independently built analytical datasets.
 
 #### Gold Incident Summary
 
-**Grain:** One row per `created_date`, `service`, `region`, and `severity`.
+**Grain:** one row per `created_date`, `service`, `region`, and
+`severity`.
 
-| Column | Description |
-|---|---|
-| `created_date` | Date the incident was created |
-| `service` | Affected service |
-| `region` | Affected region |
-| `severity` | Incident severity |
-| `incident_count` | Total incidents in the group |
-| `resolved_count` | Incidents marked resolved |
-| `open_count` | Incidents marked open |
-| `avg_duration_minutes` | Average available incident duration in minutes |
+  -----------------------------------------------------------------------
+  Column                              Description
+  ----------------------------------- -----------------------------------
+  `created_date`                      Date the incident was created
 
-The average duration excludes null values. Groups with no available duration have a null average rather than a misleading value of zero.
+  `service`                           Affected service
+
+  `region`                            Affected region
+
+  `severity`                          Incident severity
+
+  `incident_count`                    Total incidents in the group
+
+  `resolved_count`                    Incidents marked resolved
+
+  `open_count`                        Incidents marked open
+
+  `avg_duration_minutes`              Average available incident duration
+                                      in minutes
+  -----------------------------------------------------------------------
+
+Null durations are excluded from the average. If no duration is
+available in a group, the average remains null rather than being
+represented as zero.
+
+Run it with:
+
+``` bash
+python pipeline/build_gold.py
+```
 
 #### Gold Resolution Performance
 
-**Grain:** One row per `resolution_date`, `service`, and `severity`.
+**Grain:** one row per `resolution_date`, `service`, and `severity`.
 
-This dataset focuses on resolved incidents with a non-null resolution timestamp.
+Only resolved incidents with a non-null resolution timestamp are
+included.
 
-| Column | Description |
-|---|---|
-| `resolution_date` | Date the incident was resolved |
-| `service` | Affected service |
-| `severity` | Incident severity |
-| `resolved_incident_count` | Number of resolved incidents in the group |
-| `duration_observation_count` | Number of valid duration observations used for duration metrics |
-| `avg_resolution_minutes` | Average resolution duration in minutes |
-| `median_resolution_minutes` | Approximate median resolution duration in minutes |
-| `max_resolution_minutes` | Maximum resolution duration in minutes |
+  -----------------------------------------------------------------------
+  Column                              Description
+  ----------------------------------- -----------------------------------
+  `resolution_date`                   Date the incident was resolved
 
-The median is calculated using PySpark's `percentile_approx` function. This provides an approximate percentile rather than an exact median calculation.
+  `service`                           Affected service
 
-### 6. Gold Data Quality Gates
+  `severity`                          Incident severity
 
-Both Gold pipelines validate their output before publishing it.
+  `resolved_incident_count`           Number of resolved incidents in the
+                                      group
 
-**Incident Summary validations:**
+  `duration_observation_count`        Number of valid duration
+                                      observations
 
-- **Schema integrity:** All eight required columns are present.
-- **Incident-count reconciliation:** The sum of Gold `incident_count` values matches the Silver record count.
-- **Group-count reconciliation:** Resolved and open counts are non-negative and sum to each group's total.
-- **Unique grain:** No duplicate rows exist for the defined four-column grouping grain.
+  `avg_resolution_minutes`            Average resolution duration
 
-**Resolution Performance validations:**
+  `median_resolution_minutes`         Approximate median resolution
+                                      duration
 
-- **Schema integrity:** All eight required columns are present.
-- **Resolution-count reconciliation:** Aggregated resolved incident counts match the eligible resolved Silver records.
-- **Metric validity:** Resolution-duration metrics satisfy the defined validity checks.
-- **Unique grain:** No duplicate rows exist for the defined three-column grouping grain.
+  `max_resolution_minutes`            Maximum resolution duration
+  -----------------------------------------------------------------------
 
-A failed validation prevents the candidate Gold dataset from becoming the published version.
+The median uses PySpark's `percentile_approx`, so it is an approximate
+percentile rather than an exact median.
 
-### 7. Versioned Dataset Publishing
+Run it with:
 
-Silver and both Gold pipelines use a shared publishing module implemented in `src/data_publishing.py`.
-
-Instead of overwriting a single Parquet directory directly, each successful publication creates a new version under a `versions/` directory.
-
-**Publishing workflow:**
-
-1. Generate a unique version ID using a UTC timestamp and UUID suffix.
-2. Write candidate Parquet data to a new version directory.
-3. Read the staged dataset back and verify its row count.
-4. Update the `current.json` manifest only after verification succeeds.
-5. Allow downstream readers to resolve the currently published version through the manifest.
-
-Example directory structure:
-
-```text
-data/
-├── silver/
-│   └── incidents/
-│       ├── current.json
-│       └── versions/
-│           └── <version_id>/
-│               ├── part-*.parquet
-│               └── _SUCCESS
-└── gold/
-    ├── incident_summary/
-    │   ├── current.json
-    │   └── versions/
-    │       └── <version_id>/
-    └── resolution_performance/
-        ├── current.json
-        └── versions/
-            └── <version_id>/
+``` bash
+python pipeline/build_resolution_performance.py
 ```
 
-The manifest identifies the currently published version:
+### 7. Gold quality gates
 
-```json
-{
-  "version_id": "<version_id>",
-  "path": "versions/<version_id>"
-}
+Both Gold pipelines validate their outputs before publishing.
+
+**Incident Summary checks:**
+
+-   Required schema
+-   Reconciliation of aggregated incident counts with Silver input
+-   Non-negative resolved/open counts that sum to each group's total
+-   Unique four-column grouping grain
+
+**Resolution Performance checks:**
+
+-   Required schema
+-   Reconciliation of aggregated resolved counts with eligible Silver
+    records
+-   Resolution-duration metric validity
+-   Unique three-column grouping grain
+
+A failed quality check prevents the candidate Gold dataset from becoming
+the published version.
+
+### 8. Versioned dataset publishing
+
+Silver, Gold, and the incremental Bronze path use
+`src/data_publishing.py`.
+
+Each successful publication:
+
+1.  Generates a unique version ID from a UTC timestamp and UUID suffix.
+2.  Writes candidate Parquet data to a new directory under `versions/`.
+3.  Reads the staged dataset back and verifies its row count.
+4.  Updates `current.json` only after verification succeeds.
+5.  Allows readers to resolve the active version through the manifest.
+
+Example layout:
+
+``` text
+data/silver/incidents/
+├── current.json
+└── versions/
+    └── <version_id>/
+        ├── part-*.parquet
+        └── _SUCCESS
 ```
 
-The actual version ID is generated at runtime.
+The manifest contains a version ID and a relative path such as
+`versions/<version_id>`. The reader validates that the path matches the
+version ID, stays within the dataset directory, and points to an
+existing directory.
 
-**Failure handling:**
+Failure behavior:
 
-- If staging or row-count verification fails, the failed candidate version is removed.
-- If candidate verification fails, the existing manifest remains unchanged.
-- If manifest publication fails, the verified candidate is retained for inspection; it may remain unpublished.
-- Previously published versions are retained rather than overwritten.
-- The manifest-aware reader validates the manifest structure, checks that the relative path matches the version ID, and verifies that the referenced directory exists before reading Parquet.
+-   If staging or row-count verification fails, the failed candidate
+    version is removed.
+-   If manifest publication fails, the previous manifest remains active;
+    a verified but unpublished candidate may be retained for inspection.
+-   Previously published versions are retained instead of overwritten.
 
-**Important limitations:** This implementation targets a single publisher on a local filesystem. Atomic manifest replacement relies on local filesystem semantics. Concurrent publishers are not coordinated with locking or compare-and-swap, and cloud object storage requires storage-specific publication and consistency guarantees.
+**Publishing limitations:** this implementation targets a single
+publisher on a local filesystem. Atomic manifest replacement relies on
+local filesystem semantics. Concurrent publishers are not coordinated
+with locking or compare-and-swap. Cloud object storage requires
+storage-specific publication and consistency guarantees.
 
-### 8. Run-Level Observability
+### 9. Run-level observability
 
-The three transformation pipelines use the shared observability module in `src/run_observability.py`. Each run creates a unique run ID and records execution metadata in a JSON Lines (JSONL) file.
+The Silver and Gold transformation pipelines use
+`src/run_observability.py`. Each run creates a unique run ID and appends
+a JSON Lines record.
 
-| Pipeline | Run log |
-|---|---|
-| Silver | `data/observability/build_silver_runs.jsonl` |
-| Gold Incident Summary | `data/observability/build_gold_runs.jsonl` |
-| Gold Resolution Performance | `data/observability/build_resolution_performance_runs.jsonl` |
+  --------------------------------------------------------------------------------------------------
+  Pipeline                            Run log
+  ----------------------------------- --------------------------------------------------------------
+  Silver                              `data/observability/build_silver_runs.jsonl`
 
-Each record includes:
+  Gold Incident Summary               `data/observability/build_gold_runs.jsonl`
 
-- `run_id` — unique identifier for the execution.
-- `pipeline_name` — pipeline that ran.
-- `status` — `RUNNING`, `SUCCESS`, or `FAILED` as the run progresses.
-- `started_at` and `finished_at` — UTC timestamps.
-- `input_records` and `output_records` — row counts when available. For Gold pipelines, the output count is the number of aggregated Gold rows.
-- `quality_gate_passed` — quality-gate outcome, or `null` if the gate did not complete.
-- `published_version_path` — published version path after successful publication and read-back verification.
-- `error_message` — exception type and message when a run fails.
+  Gold Resolution Performance         `data/observability/build_resolution_performance_runs.jsonl`
+  --------------------------------------------------------------------------------------------------
 
-Run records are appended rather than replacing previous records. A safe logging wrapper reports a warning if a JSONL write fails, avoiding masking an existing pipeline exception. If logging fails after an otherwise successful pipeline run, the pipeline may still succeed without a persisted run record.
+Run records include:
 
-**Operational limitations:** These are local JSONL logs, not a centralized logging service or transactional audit store. Concurrent-writer coordination, guaranteed log persistence during filesystem failures, alerting, and log rotation are not implemented yet.
+-   `run_id` and `pipeline_name`
+-   `status`: `RUNNING`, `SUCCESS`, or `FAILED`
+-   UTC start and finish timestamps
+-   Input and output record counts when available
+-   Quality-gate outcome
+-   Published version path after successful publication
+-   Exception type and message when a run fails
 
-### 9. Automated Testing
+Logs are local JSONL files, not a centralized logging service or
+transactional audit store. Logging failures may result in a missing run
+record without masking the main pipeline exception. Concurrent-writer
+coordination, alerting, guaranteed persistence during filesystem
+failures, and log rotation are not implemented.
 
-Pytest tests cover:
+## Automated Testing
 
-- Schema loading
-- Bronze data quality
-- Silver transformations
-- Silver quality validation
-- Gold transformations
-- Gold quality validation
-- Resolution Performance aggregations and quality checks
-- Versioned publishing and manifest handling
-- Published dataset read-back and failure recovery
-- Pipeline publishing contracts
-- Run metadata generation and lifecycle updates
-- JSONL persistence and safe logging behavior
-- Pipeline observability contracts
-- Shared Spark test-session behavior
+Run the full test suite with:
 
-Tests include valid scenarios, deliberately invalid inputs, count reconciliation, duplicate-grain detection, null handling, manifest replacement, preservation of the previously published version when candidate verification fails, and structural checks that all three pipelines use the shared observability functions.
+``` bash
+pytest -q
+```
 
-**Current test suite: 76 passing tests.**
+The suite covers schema loading, data quality, Silver and Gold
+transformations, quality gates, publishing and manifest handling,
+failure recovery, observability, incremental merging, checkpoint
+persistence, batch skipping, invalid-record quarantine, and pipeline
+contracts.
+
+**Latest reported test result: 98 tests passed.** Re-run the suite after
+making changes to confirm the current result.
 
 ## Technology Stack
 
-- Python 3.12
-- PySpark 4.2
-- Apache Spark
-- YAML
-- Parquet
-- pytest
-- `uv` for Python environment and dependency management
-- Java 21
+-   Python 3.12
+-   PySpark 4.2 / Apache Spark
+-   YAML
+-   Parquet
+-   pytest
+-   `uv` for Python environment and dependency management
+-   Java 21
 
 ## Project Structure
 
-```text
+``` text
 incident-intelligence/
 ├── configs/
 │   ├── incident_schema.yaml
 │   └── incident_quality_rules.yaml
 ├── data/
 │   ├── raw/
+│   ├── incoming/
+│   │   └── incidents/
 │   ├── bronze/
 │   ├── silver/
 │   ├── gold/
 │   │   ├── incident_summary/
 │   │   └── resolution_performance/
 │   ├── quarantine/
+│   ├── state/
 │   └── observability/
 ├── pipeline/
 │   ├── ingest_incidents.py
+│   ├── process_incident_batch.py
 │   ├── build_silver.py
 │   ├── build_gold.py
 │   └── build_resolution_performance.py
@@ -306,6 +450,7 @@ incident-intelligence/
 │   ├── schema_loader.py
 │   ├── incident_generator.py
 │   ├── data_quality.py
+│   ├── incremental_ingestion.py
 │   ├── silver_transform.py
 │   ├── silver_quality.py
 │   ├── gold_transform.py
@@ -313,7 +458,6 @@ incident-intelligence/
 │   ├── data_publishing.py
 │   └── run_observability.py
 ├── tests/
-│   ├── conftest.py
 │   ├── test_schema_loader.py
 │   ├── test_data_quality.py
 │   ├── test_silver_transform.py
@@ -322,7 +466,8 @@ incident-intelligence/
 │   ├── test_gold_quality.py
 │   ├── test_gold_resolution_performance.py
 │   ├── test_data_publishing.py
-│   ├── test_pipeline_publishing_contract.py
+│   ├── test_incremental_checkpoint.py
+│   ├── test_incremental_ingestion.py
 │   ├── test_run_observability.py
 │   └── test_pipeline_observability_contract.py
 ├── pyproject.toml
@@ -330,97 +475,135 @@ incident-intelligence/
 └── README.md
 ```
 
-Generated datasets and observability logs are local development artifacts and are excluded from Git through `.gitignore`.
+Generated datasets, local checkpoints, and observability logs are
+development artifacts and should remain excluded from Git.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.12
-- Java 21
-- `uv`
+-   Python 3.12
+-   Java 21
+-   `uv`
 
 ### Install dependencies
 
-Run the following commands from the project root:
+Run from the project root:
 
-```bash
+``` bash
 uv sync
 source .venv/bin/activate
 ```
 
-### Run the Bronze ingestion pipeline
+### Run the full-load pipeline
 
-```bash
-python -m pipeline.ingest_incidents
+``` bash
+python pipeline/ingest_incidents.py
+python pipeline/build_silver.py
+python pipeline/build_gold.py
+python pipeline/build_resolution_performance.py
 ```
 
-### Build the Silver dataset
+Run these in order when building the full-load dataset from scratch.
 
-```bash
-python -m pipeline.build_silver
+### Run the incremental demonstration
+
+Process batches sequentially:
+
+``` bash
+python pipeline/process_incident_batch.py batch_0001
+python pipeline/process_incident_batch.py batch_0002
+python pipeline/process_incident_batch.py batch_0003
 ```
 
-### Build the Gold Incident Summary
+Re-running a batch already recorded in
+`data/state/incident_ingestion.json` should return `status: skipped`.
 
-```bash
-python -m pipeline.build_gold
+The incremental demonstration writes to
+`data/bronze/incremental_incidents/` and does not replace the normal
+full-load Bronze dataset. To reset the demonstration, first stop any
+running pipeline, then remove only its incremental output and
+checkpoint:
+
+``` bash
+rm -rf data/bronze/incremental_incidents
+rm -rf data/quarantine/incremental_incidents
+rm -f data/state/incident_ingestion.json
 ```
 
-### Build Gold Resolution Performance
-
-```bash
-python -m pipeline.build_resolution_performance
-```
-
-### Run all tests
-
-```bash
-pytest -v
-```
+Do not remove `data/bronze/incidents/` when resetting the incremental
+demonstration.
 
 ### Inspect the latest run records
 
-```bash
+``` bash
 tail -n 1 data/observability/build_silver_runs.jsonl
 tail -n 1 data/observability/build_gold_runs.jsonl
 tail -n 1 data/observability/build_resolution_performance_runs.jsonl
 ```
 
-These commands show the most recently appended run record for each pipeline.
+These commands show the most recently appended record for each
+transformation pipeline.
 
 ## Current Verification
 
-The current synthetic dataset and pipeline have been verified with:
+The full-load dataset has been verified with:
 
-- **100** raw incident records.
-- **92** valid records accepted into Bronze.
-- **8** invalid records quarantined.
-- **92** records transformed into Silver.
-- **27** columns in Silver.
-- **89** aggregated rows in Gold Incident Summary.
-- **8** columns in Gold Incident Summary.
-- **64** aggregated rows in Gold Resolution Performance in the verified run.
-- **8** columns in Gold Resolution Performance.
-- **76** automated tests passing.
-- Successful JSONL run records observed for Silver and both Gold pipelines.
+-   100 raw incident records
+-   92 valid records accepted into Bronze
+-   8 invalid records quarantined
+-   92 records transformed into Silver
+-   27 columns in Silver
+-   89 aggregated rows in Gold Incident Summary in the verified run
+-   64 aggregated rows in Gold Resolution Performance in the verified
+    run
+-   8 columns in each Gold dataset
 
-These counts describe the current synthetic dataset and verified runs, not fixed production expectations. Gold row counts depend on the data and the distinct combinations of each table's grouping dimensions. Version IDs and publication paths are generated dynamically.
+The incremental demonstration has also been run with sample batches:
+
+-   After `batch_0001`: 2 published records
+-   After `batch_0002`: 3 published records, including one update and
+    one insert
+-   After `batch_0003`: 4 published records, with one invalid row
+    quarantined
+-   Replaying a checkpointed batch: skipped without publishing another
+    version
+
+These values describe the current synthetic dataset and demonstrated
+runs, not fixed production expectations. Gold row counts depend on the
+distinct combinations of grouping dimensions. Version IDs and paths are
+generated dynamically.
+
+The latest reported regression run had **98 passing tests**.
 
 ## Engineering Principles
 
-- Explicit schema enforcement
-- Configurable data quality rules
-- Separation of transformation and validation logic
-- Quarantine of invalid records
-- Automated regression testing
-- Validation before publication
-- Versioned datasets and manifest-aware readers
-- Run-level observability with execution IDs and status records
-- Reproducible development workflows
-- Layered data architecture with clear responsibilities
-- Explicit documentation of failure modes and operational limitations
+-   Explicit schema enforcement
+-   Configurable data quality rules
+-   Separation of transformation and validation logic
+-   Quarantine of invalid records
+-   Incremental inserts and updates
+-   Checkpointed batch progress and replay handling
+-   Automated regression and failure-path testing
+-   Validation before publication
+-   Versioned datasets and manifest-aware readers
+-   Run-level observability with execution IDs and status records
+-   Reproducible development workflows
+-   Clear separation between local guarantees and production
+    requirements
+-   Explicit documentation of failure modes and operational limitations
 
 ## Roadmap
 
-The next stage is to strengthen operational reliability through controlled failure scenarios and deeper idempotency testing. Planned improvements include verifying that previously published datasets remain available after failures, testing failure handling at different pipeline stages, and reviewing retry behavior. Later stages can introduce orchestration and additional downstream analytics while keeping data engineering reliability as the foundation.
+Next planned improvements:
+
+1.  Strengthen quarantine recovery so replay after partial failure is
+    safe.
+2.  Add protection against concurrent batch processing.
+3.  Add incremental-pipeline observability and operational metrics.
+4.  Integrate the batch and transformation workflows with Apache
+    Airflow.
+5.  Orchestrate downstream Silver and Gold refreshes after successful
+    Bronze publication.
+6.  Explore downstream ML and RAG pipelines once the data platform
+    orchestration is stable.
